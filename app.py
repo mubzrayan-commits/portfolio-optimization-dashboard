@@ -1,4 +1,3 @@
-
 import streamlit as st
 import yfinance as yf
 import numpy as np
@@ -7,146 +6,251 @@ from scipy.optimize import minimize
 
 st.set_page_config(
     page_title="Portfolio Optimization Dashboard",
-    page_icon="📈",
-    layout="centered"
+    page_icon="📊",
+    layout="wide"
 )
 
-st.title("📈 Portfolio Optimization Dashboard")
-st.write("Optimize asset allocation using Maximum Sharpe or Minimum Volatility.")
+st.title("📊 Portfolio Optimization Dashboard")
+st.caption("Portfolio analytics, asset allocation and optimization engine")
 
-default_assets = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+# -----------------------------
+# SIDEBAR
+# -----------------------------
+st.sidebar.header("Portfolio Inputs")
 
-assets_text = st.text_input(
+assets_text = st.sidebar.text_input(
     "Assets",
-    value=", ".join(default_assets),
-    help="Enter ticker symbols separated by commas."
+    "AAPL, MSFT, GOOGL, AMZN"
 )
 
-capital = st.number_input(
+capital = st.sidebar.number_input(
     "Investment Capital ($)",
-    min_value=100.0,
+    min_value=1000.0,
     value=100000.0,
     step=1000.0
 )
 
-method = st.selectbox(
+method = st.sidebar.selectbox(
     "Optimization Method",
     ["Maximum Sharpe", "Minimum Volatility"]
 )
 
-def portfolio_dashboard(asset_text, capital, method):
-    assets = [x.strip().upper() for x in asset_text.split(",") if x.strip()]
-    assets = list(dict.fromkeys(assets))
+period = st.sidebar.selectbox(
+    "Historical Data",
+    ["1y", "2y", "5y"]
+)
 
-    if len(assets) < 2:
-        st.error("Please enter at least two assets.")
-        return
+# -----------------------------
+# ASSET LIST
+# -----------------------------
+assets = [
+    x.strip().upper()
+    for x in assets_text.split(",")
+    if x.strip()
+]
 
-    try:
-        data = yf.download(
-            assets,
-            period="2y",
-            interval="1d",
-            auto_adjust=True,
-            progress=False
-        )["Close"]
+assets = list(dict.fromkeys(assets))
 
-        if isinstance(data, pd.Series):
-            data = data.to_frame()
+if len(assets) < 2:
+    st.error("Enter at least two assets.")
+    st.stop()
 
-        data = data.dropna(axis=1, how="all").dropna()
+# -----------------------------
+# DOWNLOAD DATA
+# -----------------------------
+@st.cache_data(ttl=3600)
+def load_data(tickers, selected_period):
+    data = yf.download(
+        tickers,
+        period=selected_period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False
+    )["Close"]
 
-        available = [a for a in assets if a in data.columns]
-        data = data[available]
+    if isinstance(data, pd.Series):
+        data = data.to_frame()
 
-        if len(available) < 2:
-            st.error("Not enough valid ticker symbols were found.")
-            return
+    data = data.dropna(axis=1, how="all")
+    data = data.dropna()
 
-        returns = data.pct_change().dropna()
+    return data
 
-        if returns.empty:
-            st.error("Not enough historical price data.")
-            return
 
-        mean_returns = returns.mean() * 252
-        cov_matrix = returns.cov() * 252
-        n = len(available)
+try:
+    prices = load_data(assets, period)
 
-        def portfolio_return(weights):
-            return np.dot(weights, mean_returns.values)
+    available = [a for a in assets if a in prices.columns]
 
-        def portfolio_volatility(weights):
-            return np.sqrt(
-                np.dot(weights.T, np.dot(cov_matrix.values, weights))
-            )
+    if len(available) < 2:
+        st.error("Not enough valid assets were found.")
+        st.stop()
 
-        def negative_sharpe(weights):
-            volatility = portfolio_volatility(weights)
-            if volatility == 0:
-                return 1e6
-            return -portfolio_return(weights) / volatility
+    prices = prices[available]
+    returns = prices.pct_change().dropna()
 
-        constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
-        bounds = tuple((0, 1) for _ in range(n))
-        initial = np.ones(n) / n
+except Exception as e:
+    st.error(f"Unable to download market data: {e}")
+    st.stop()
 
-        if method == "Maximum Sharpe":
-            result = minimize(
-                negative_sharpe,
-                initial,
-                method="SLSQP",
-                bounds=bounds,
-                constraints=constraints
-            )
-        else:
-            result = minimize(
-                portfolio_volatility,
-                initial,
-                method="SLSQP",
-                bounds=bounds,
-                constraints=constraints
-            )
+# -----------------------------
+# PORTFOLIO FUNCTIONS
+# -----------------------------
+annual_returns = returns.mean() * 252
+covariance = returns.cov() * 252
 
-        if not result.success:
-            st.error("Optimization failed. Please try again.")
-            return
+n = len(available)
 
-        weights = result.x
-        expected_return = portfolio_return(weights)
-        volatility = portfolio_volatility(weights)
-        sharpe = expected_return / volatility if volatility != 0 else 0
+def portfolio_return(weights):
+    return np.dot(weights, annual_returns.values)
 
-        allocation = pd.DataFrame({
-            "Asset": available,
-            "Weight": weights,
-            "Investment ($)": weights * capital
-        })
+def portfolio_volatility(weights):
+    return np.sqrt(
+        weights.T @ covariance.values @ weights
+    )
 
-        st.subheader("Optimal Portfolio")
+def negative_sharpe(weights):
+    volatility = portfolio_volatility(weights)
 
-        display = allocation.copy()
-        display["Weight"] = display["Weight"].map(lambda x: f"{x:.2%}")
-        display["Investment ($)"] = display["Investment ($)"].map(
-            lambda x: f"${x:,.2f}"
-        )
+    if volatility == 0:
+        return 999999
 
-        st.dataframe(display, hide_index=True, use_container_width=True)
+    return -portfolio_return(weights) / volatility
 
-        st.metric("Expected Annual Return", f"{expected_return:.2%}")
-        st.metric("Annual Volatility", f"{volatility:.2%}")
-        st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+constraints = {
+    "type": "eq",
+    "fun": lambda weights: np.sum(weights) - 1
+}
 
-        st.write(f"**Investment Capital:** ${capital:,.2f}")
+bounds = [(0, 1) for _ in range(n)]
+initial_weights = np.ones(n) / n
 
-        st.subheader("Allocation Chart")
-        chart_data = allocation.set_index("Asset")["Weight"]
-        st.bar_chart(chart_data)
+if method == "Maximum Sharpe":
+    result = minimize(
+        negative_sharpe,
+        initial_weights,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints
+    )
+else:
+    result = minimize(
+        portfolio_volatility,
+        initial_weights,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints
+    )
 
-        st.caption("Historical data is retrieved from Yahoo Finance. This dashboard is for analysis and does not constitute investment advice.")
+if not result.success:
+    st.error("Optimization failed.")
+    st.stop()
 
-    except Exception as e:
-        st.error(f"Error: {e}")
+weights = result.x
 
-if st.button("Optimize Portfolio", type="primary"):
-    portfolio_dashboard(assets_text, capital, method)
+expected_return = portfolio_return(weights)
+volatility = portfolio_volatility(weights)
+
+sharpe = (
+    expected_return / volatility
+    if volatility > 0
+    else 0
+)
+
+# -----------------------------
+# RESULTS
+# -----------------------------
+st.subheader("Optimal Portfolio")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric(
+    "Expected Return",
+    f"{expected_return * 100:.2f}%"
+)
+
+col2.metric(
+    "Annual Volatility",
+    f"{volatility * 100:.2f}%"
+)
+
+col3.metric(
+    "Sharpe Ratio",
+    f"{sharpe:.2f}"
+)
+
+col4.metric(
+    "Capital",
+    f"${capital:,.0f}"
+)
+
+# -----------------------------
+# ALLOCATION
+# -----------------------------
+allocation = pd.DataFrame({
+    "Asset": available,
+    "Weight": weights,
+    "Allocation ($)": weights * capital
+})
+
+allocation["Weight"] = allocation["Weight"] * 100
+
+st.subheader("Asset Allocation")
+
+st.dataframe(
+    allocation.style.format({
+        "Weight": "{:.2f}%",
+        "Allocation ($)": "${:,.2f}"
+    }),
+    use_container_width=True,
+    hide_index=True
+)
+
+st.bar_chart(
+    allocation.set_index("Asset")["Weight"]
+)
+
+# -----------------------------
+# MARKET DATA
+# -----------------------------
+with st.expander("Market Data"):
+    st.dataframe(
+        prices.tail(10),
+        use_container_width=True
+    )
+
+# -----------------------------
+# RISK / RETURN
+# -----------------------------
+st.subheader("Asset Risk & Return")
+
+asset_stats = pd.DataFrame({
+    "Asset": available,
+    "Annual Return": annual_returns.values * 100,
+    "Annual Volatility": np.sqrt(
+        np.diag(covariance.values)
+    ) * 100
+})
+
+st.dataframe(
+    asset_stats.style.format({
+        "Annual Return": "{:.2f}%",
+        "Annual Volatility": "{:.2f}%"
+    }),
+    use_container_width=True,
+    hide_index=True
+)
+
+# -----------------------------
+# CORRELATION
+# -----------------------------
+st.subheader("Correlation Matrix")
+
+st.dataframe(
+    returns.corr().style.format("{:.2f}"),
+    use_container_width=True
+)
+
+st.caption(
+    "Optimization uses historical market data and long-only portfolio weights."
+)
